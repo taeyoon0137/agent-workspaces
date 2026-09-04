@@ -1,0 +1,17 @@
+# Local configurations
+workspaces/*
+skills/*
+
+# Global skills
+!skills/find-skills
+!skills/workspace-context
+!skills/workspace-skill-create
+
+# Usable skills – OK to remove when no longer usable
+!skills/i-have-adhd
+!skills/ponytail
+!skills/ponytail-review
+
+# Vercel
+# Automatically generated lock file
+.skill-lock.json
