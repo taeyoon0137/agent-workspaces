@@ -4,6 +4,9 @@
 #
 #   ctx id|dir|init|status|check|index|facts|skills|active|find|show|add|set|migrate|help
 set -u
+NL='
+'
+IFS=$NL   # $AGENTS_HOME에 공백이 있을 수 있으므로 확장 분리는 개행만 사용함
 
 AGENTS_HOME="${AGENTS_HOME:-$HOME/.agents}"
 WS_ROOT="$AGENTS_HOME/workspaces"
@@ -24,7 +27,7 @@ canon() {  # canonical real path of a directory
   ( CDPATH= cd -- "$1" 2>/dev/null && pwd -P ) || die "not a directory: $1"
 }
 root_of() {  # git toplevel if inside a repo, else the folder itself
-  p=$(canon "${1:-.}")
+  p=$(canon "${1:-.}") || exit 1
   top=$(git -C "$p" rev-parse --show-toplevel 2>/dev/null || true)
   [ -n "$top" ] && p=$(canon "$top")
   printf '%s\n' "$p"
@@ -34,28 +37,30 @@ sha16() {
   else printf '%s' "$1" | sha256sum | cut -c1-16; fi
 }
 ws_id() {
-  p=$(root_of "${1:-.}")
+  p=$(root_of "${1:-.}") || exit 1
   base=$(basename "$p" | tr 'A-Z' 'a-z' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//')
   printf '%s-%s\n' "$base" "$(sha16 "$p")"
 }
-ws_dir() { printf '%s/%s\n' "$WS_ROOT" "$(ws_id "${1:-.}")"; }
+ws_dir() { i=$(ws_id "${1:-.}") || exit 1; printf '%s/%s\n' "$WS_ROOT" "$i"; }
 
 # resolve workspace dir from an optional path argument; sets W
-resolve() { W=$(ws_dir "${1:-.}"); [ -d "$W" ] || die "no workspace at $W (run: ctx init)"; }
+resolve() { W=$(ws_dir "${1:-.}") || exit 1; [ -d "$W" ] || die "no workspace at $W (run: ctx init)"; }
 
 # ---- measurement -------------------------------------------------------------
 chars_of() { LC_ALL=C tr -d '\200-\277' < "$1" | wc -c | tr -d ' '; }   # Unicode scalar count
 lines_of() { wc -l < "$1" | tr -d ' '; }
 strlen() { printf '%s' "$1" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' '; }
 body_of() { awk 'NR==1&&$0=="---"{f=1;next} f==1&&$0=="---"{f=2;next} f==2{print}' "$1"; }
-body_chars() { body_of "$1" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' '; }
+# body_of 출력에는 선행 공백행과 끝 개행이 포함되므로, cmd_add의 `strlen "$body"`와 같은 기준이 되도록 2를 뺌
+body_chars() { n=$(body_of "$1" | LC_ALL=C tr -d '\200-\277' | wc -c | tr -d ' '); [ "$n" -ge 2 ] && n=$((n-2)); printf '%s\n' "$n"; }
 
 # ---- frontmatter -------------------------------------------------------------
 fm() {  # fm <file> <key>
   awk -v k="$2" 'NR==1&&$0!="---"{exit} NR>1&&$0=="---"{exit} NR>1{i=index($0,":"); if(i&&substr($0,1,i-1)==k){v=substr($0,i+1); sub(/^ +/,"",v); print v; exit}}' "$1"
 }
 set_fm() {  # set_fm <file> <key> <value>
-  awk -v k="$2" -v v="$3" 'BEGIN{infm=0;done=0} NR==1&&$0=="---"{infm=1;print;next}
+  [ "$(printf '%s' "$3" | wc -l | tr -d ' ')" -eq 0 ] || die "value must be a single line"
+  CTX_K="$2" CTX_V="$3" awk 'BEGIN{k=ENVIRON["CTX_K"];v=ENVIRON["CTX_V"];infm=0;done=0} NR==1&&$0=="---"{infm=1;print;next}
     infm&&$0=="---"{ if(!done){print k": "v}; infm=0; print; next }
     infm{ i=index($0,":"); if(i&&substr($0,1,i-1)==k){print k": "v; done=1; next} }
     {print}' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
@@ -89,6 +94,11 @@ list_skills() {  # local skills: name<TAB>description
     printf '%s\t%s\n' "$(fm "$sk" name)" "$(fm "$sk" description)"; done
 }
 
+lock() {  # 워크스페이스 단위로 id 할당과 레코드 쓰기를 직렬화함
+  LOCK="$W/.lock"; n=0
+  until mkdir "$LOCK" 2>/dev/null; do n=$((n+1)); [ "$n" -lt 100 ] || die "workspace busy: $LOCK"; sleep 0.1; done
+  trap 'rmdir "$LOCK" 2>/dev/null' EXIT INT TERM
+}
 next_id() {  # next zero-padded sequence number across all records
   n=$(ls "$W"/records 2>/dev/null | sed -n 's/^[A-Z]-\([0-9][0-9]*\)-.*/\1/p' | sort -n | tail -1 | sed 's/^0*//')
   printf '%04d\n' $(( ${n:-0} + 1 ))
@@ -133,7 +143,7 @@ TPL
 
 # ---- commands --------------------------------------------------------------------
 cmd_init() {
-  p=$(root_of "${1:-.}"); W="$WS_ROOT/$(ws_id "$p")"
+  p=$(root_of "${1:-.}") || exit 1; W="$WS_ROOT/$(ws_id "$p")"
   kind="folder"; git -C "$p" rev-parse --show-toplevel >/dev/null 2>&1 && kind="git repository"
   mkdir -p "$W/records" "$W/artifacts/plans"
   [ -e "$W/CONTEXT.md" ] || context_template "$p" "$kind" > "$W/CONTEXT.md"
@@ -149,19 +159,21 @@ cmd_status() {
   if [ "$ch" -gt "$MAX_CHARS" ] || [ "$ln" -gt "$MAX_LINES" ]; then printf 'OVER CAP — demote history into records/ before writing more.\n'; return 1; fi
   printf 'ok\n'
 }
+section() { sed -n "/^## $1\$/,/^## /p" "$W/CONTEXT.md"; }
 cmd_check() {
   resolve "${1:-.}"; fail=0
+  [ -f "$W/CONTEXT.md" ] || { echo "FAIL: CONTEXT.md missing"; return 1; }
   cmd_status "${1:-.}" >/dev/null 2>&1 || { echo "FAIL: CONTEXT.md over cap ($(chars_of "$W/CONTEXT.md") chars / $(lines_of "$W/CONTEXT.md") lines)"; fail=1; }
   for h in Identity Objective Constraints State Blockers Next Records Skills; do
     grep -q "^## $h\$" "$W/CONTEXT.md" || { echo "FAIL: CONTEXT.md missing section '## $h'"; fail=1; }
   done
-  ln=0; while IFS= read -r l; do ln=$((ln+1)); [ "$(strlen "$l")" -le "$LINE_MAX" ] || { echo "FAIL: CONTEXT.md line $ln exceeds $LINE_MAX chars"; fail=1; }; done < "$W/CONTEXT.md"
-  for sk in $(sed -n 's/^- \([a-z0-9][a-z0-9-]*\) — .*/\1/p' "$W/CONTEXT.md"); do
+  ln=0; while IFS= read -r l || [ -n "$l" ]; do ln=$((ln+1)); [ "$(strlen "$l")" -le "$LINE_MAX" ] || { echo "FAIL: CONTEXT.md line $ln exceeds $LINE_MAX chars"; fail=1; }; done < "$W/CONTEXT.md"
+  for sk in $(section Skills | sed -n 's/^- \([a-z0-9][a-z0-9-]*\) — .*/\1/p'); do
     [ -f "$W/skills/$sk/SKILL.md" ] || { echo "FAIL: CONTEXT.md lists local skill '$sk' but skills/$sk/SKILL.md is missing"; fail=1; }
   done
   for sk in "$W"/skills/*/SKILL.md; do [ -e "$sk" ] || break; n=$(fm "$sk" name)
     [ "$n" = "$(basename "$(dirname "$sk")")" ] || { echo "FAIL: $sk frontmatter name '$n' != folder name"; fail=1; }
-    grep -q "^- $n — " "$W/CONTEXT.md" || { echo "FAIL: local skill '$n' not listed under ## Skills in CONTEXT.md"; fail=1; }
+    section Skills | grep -q "^- $n — " || { echo "FAIL: local skill '$n' not listed under ## Skills in CONTEXT.md"; fail=1; }
   done
   seen=""
   for f in $(records_sorted); do
@@ -196,8 +208,11 @@ cmd_add() {
   ty=$1; ti=$2; shift 2; tags=""; rw=""; sup=""; path="."
   while [ $# -gt 0 ]; do case "$1" in
     -t) tags=$2; shift 2;; -r) rw=$2; shift 2;; -s) sup=$2; shift 2;; *) path=$1; shift;; esac; done
-  resolve "$path"; pre=$(type_prefix "$ty"); id="$pre-$(next_id)"; f="$W/records/$id-$(slug "$ti").md"
+  resolve "$path"; pre=$(type_prefix "$ty") || exit 1
   [ "$(strlen "$ti")" -le "$TITLE_MAX" ] || die "title exceeds $TITLE_MAX chars"
+  sf=""; if [ -n "$sup" ]; then sf=$(ls "$W"/records/"$sup"-*.md 2>/dev/null | head -1)
+    [ -n "$sf" ] || die "no record $sup to supersede"; fi
+  lock; id="$pre-$(next_id)"; f="$W/records/$id-$(slug "$ti").md"
   if [ -t 0 ]; then body=""; else body=$(cat); fi
   cap=$(body_cap "$ty"); [ "$cap" -eq 0 ] || [ "$(strlen "$body")" -le "$cap" ] || die "$ty body exceeds $cap chars — keep the conclusion here; put detail in an evidence record"
   { printf -- '---\nid: %s\ntype: %s\nstatus: current\ntitle: %s\ntags: %s\ncreated: %s\n' "$id" "$ty" "$ti" "$tags" "$(today)"
@@ -205,14 +220,14 @@ cmd_add() {
     printf -- '---\n\n'
     printf '%s\n' "${body:-(body)}"
   } > "$f"
-  [ -n "$sup" ] && { s=$(ls "$W"/records/"$sup"-*.md 2>/dev/null | head -1); [ -n "$s" ] && set_fm "$s" status superseded; }
+  [ -n "$sf" ] && set_fm "$sf" status superseded
   reindex; printf '%s\n' "$f"
 }
 cmd_set() {  # ctx set <id> <key> <value> [path]
   [ $# -ge 3 ] || die "usage: ctx set <id> <key> <value> [path]"; resolve "${4:-.}"
   f=$(ls "$W"/records/"$1"-*.md 2>/dev/null | head -1); [ -n "$f" ] || die "no record $1"
   [ "$2" = status ] && case " $STATUSES " in *" $3 "*) ;; *) die "status must be one of: $STATUSES";; esac
-  set_fm "$f" "$2" "$3"; reindex; printf '%s\n' "$f"
+  lock; set_fm "$f" "$2" "$3"; reindex; printf '%s\n' "$f"
 }
 cmd_migrate() {
   # Lossless legacy conversion: old CONTEXT.md and DETAIL.*.md become history records; a fresh CONTEXT.md skeleton is written.

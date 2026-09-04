@@ -62,7 +62,7 @@ Clone into the temporary directory only; never clone directly onto `~/.agents`. 
    - Keep the clone's `.git` so future updates are `git pull`.
    - **Manual**: before merging, show the list of files that will be replaced and ask `Proceed` / `Abort`. **Automatic**: proceed and list them in the summary.
 3. Apply Step 2 promotions as decided there: a new skill plus its routing line in `AGENTS.md`, or an inline `AGENTS.md` bullet with a new stable rule id. Do not rewrite or reorder existing `AGENTS.md` rules.
-4. `chmod +x ~/.agents/bin/ctx.sh`; run `sh ~/.agents/bin/ctx.sh help` to confirm it executes.
+4. `chmod +x ~/.agents/bin/ctx.sh`; run `sh ~/.agents/bin/ctx.sh help` to confirm it executes, then `cd ~/.agents && sh bin/ctx.sh init` to create its own workspace (Step 8 verifies it).
 5. Report every replaced or merged file to the user (no reply needed).
 
 ## Step 5 — Reconcile host files and resolve conflicts
@@ -72,7 +72,7 @@ For each host file found in Step 2 that is not already an adapter:
 1. Compare its rules with `~/.agents/AGENTS.md` and the shared skills. A **conflict** is a local rule that contradicts a shared rule (different language, different register, permits something the shared policy forbids, or vice versa).
 2. **Manual**: for each conflict ask one question with four choices: `Always prefer this guide` (shared policy wins now and for future updates), `Prefer this guide this time` (shared wins now; the local rule is kept in the adapter as a commented note for later review), `Prefer the local file this time` (local wins now; recorded as a deviation), `Always prefer the local file` (local wins; recorded as a permanent host-local override in the adapter).
 3. **Automatic**: shared policy wins; the overridden local rule is preserved verbatim in the adapter under `## Host-local rules (overridden, review)`.
-4. Record every decision as `decision` records in the workspace of `~/.agents` itself: `cd ~/.agents && sh bin/ctx.sh init && sh bin/ctx.sh add decision "<summary>" -t install`. This is where a future run finds the user's earlier choices instead of asking again.
+4. Record every decision as `decision` records in the workspace of `~/.agents` itself: `cd ~/.agents && sh bin/ctx.sh add decision "<summary>" -t install`. This is where a future run finds the user's earlier choices instead of asking again.
 
 ## Step 6 — Write the adapters
 
